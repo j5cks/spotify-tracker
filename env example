@@ -1,4 +1,8 @@
-BOT_TOKEN=your_discord_bot_token_here
-USER_ID=your_discord_user_id_here
-CHANNEL_ID=your_discord_channel_id_here
-MESSAGE_ID=your_discord_message_id_here
+DISCORD_TOKEN=your_discord_bot_token
+CLIENT_ID=your_discord_app_client_id
+GUILD_ID=your_discord_server_id
+SPOTIFY_CLIENT_ID=your_spotify_app_client_id
+SPOTIFY_CLIENT_SECRET=your_spotify_app_client_secret
+SPOTIFY_REFRESH_TOKEN=your_spotify_refresh_token
+STATUS_CHANNEL_ID=channel_id_where_embed_is_sent
+STATUS_MESSAGE_ID=message_id_of_embed_to_edit (optional, bot will create if missing)
