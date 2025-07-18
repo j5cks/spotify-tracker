@@ -37,7 +37,6 @@ async function fetchSpotifyActivity() {
 
     const track = spotifyActivity.details || "Unknown Track";
     const artist = spotifyActivity.state || "Unknown Artist";
-    // Removed album and url here
     const image = spotifyActivity.assets?.largeImage
       ? spotifyActivity.assets.largeImage.replace("spotify:", "https://i.scdn.co/image/")
       : null;
@@ -68,7 +67,7 @@ async function fetchSpotifyActivity() {
 function buildEmbed(data) {
   if (!data) {
     return {
-      content: "Not listening to Spotify right now.",
+      content: "not listening to spotify right now.",
       embeds: [],
     };
   }
@@ -81,7 +80,7 @@ function buildEmbed(data) {
       iconURL:
         "https://cdn.discordapp.com/icons/1388338610884837429/d37930f7bec00e820124afeb55138fc9.webp?size=4096",
     })
-    .setDescription(`${data.track}\n${data.artist}`)
+    .setDescription(`${data.track} by ${data.artist}`)
     .setImage(data.image || null)
     .addFields(
       {
