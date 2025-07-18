@@ -37,8 +37,7 @@ async function fetchSpotifyActivity() {
 
     const track = spotifyActivity.details || "Unknown Track";
     const artist = spotifyActivity.state || "Unknown Artist";
-    const album = spotifyActivity.assets?.largeText || "Unknown Album";
-    const url = `https://open.spotify.com/track/${spotifyActivity.syncId}`;
+    // Removed album and url here
     const image = spotifyActivity.assets?.largeImage
       ? spotifyActivity.assets.largeImage.replace("spotify:", "https://i.scdn.co/image/")
       : null;
@@ -59,7 +58,7 @@ async function fetchSpotifyActivity() {
     const duration = durationMs > 0 ? msToTime(durationMs) : "Unknown";
     const progress = progressMs > 0 ? msToTime(progressMs) : "Unknown";
 
-    return { track, artist, album, url, image, startMs, endMs, duration, progress };
+    return { track, artist, image, startMs, endMs, duration, progress };
   } catch (error) {
     console.error("Error fetching Spotify activity:", error);
     return null;
@@ -75,16 +74,14 @@ function buildEmbed(data) {
   }
 
   const embed = new EmbedBuilder()
-    .setTitle("currently listening")
+    .setTitle("jack is currently listening to")
     .setColor(0x000000) // black color
     .setAuthor({
       name: "/lowky",
       iconURL:
         "https://cdn.discordapp.com/icons/1388338610884837429/d37930f7bec00e820124afeb55138fc9.webp?size=4096",
     })
-    .setDescription(
-      `${data.track}\n${data.artist}\nAlbum: ${data.album}\n[Open in Spotify](${data.url})`
-    )
+    .setDescription(`${data.track}\n${data.artist}`)
     .setImage(data.image || null)
     .addFields(
       {
