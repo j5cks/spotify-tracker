@@ -17,34 +17,7 @@ const USER_ID = process.env.USER_ID;
 const CHANNEL_ID = process.env.CHANNEL_ID;
 const ALLOWED_ROLE_ID = "1388340520128086182";
 
-let storedMessageId = process.env.MESSAGE_ID || null; // fallback if you want
-
-const embedTemplate = `{
-  "title": "currently listening",
-  "description": "**{track}**\\nby **{artist}**\\nAlbum: {album}\\n[Open in Spotify]({url})",
-  "color": 1752220,
-  "author": {
-    "name": "/lowky",
-    "url": "https://cdn.discordapp.com/icons/1388338610884837429/d37930f7bec00e820124afeb55138fc9.webp?size=4096"
-  },
-  "image": {
-    "url": "{image}"
-  },
-  "footer": {
-    "text": "Started: {start} | Ends: {end} | {progress}/{duration}"
-  }
-}`;
-
-function msToTime(duration) {
-  const seconds = Math.floor((duration / 1000) % 60);
-  const minutes = Math.floor((duration / (1000 * 60)) % 60);
-  return `${minutes}:${seconds.toString().padStart(2, "0")}`;
-}
-
-function timestampToDiscord(ts) {
-  const unixSeconds = Math.floor(ts / 1000);
-  return `<t:${unixSeconds}:t>`;
-}
+let storedMessageId = process.env.MESSAGE_ID || null;
 
 async function fetchSpotifyActivity() {
   try {
@@ -74,15 +47,19 @@ async function fetchSpotifyActivity() {
     const endMs = spotifyActivity.timestamps?.end || 0;
     const now = Date.now();
 
-    const start = startMs ? timestampToDiscord(startMs) : "Unknown";
-    const end = endMs ? timestampToDiscord(endMs) : "Unknown";
     const durationMs = endMs - startMs;
     const progressMs = now - startMs;
+
+    function msToTime(duration) {
+      const seconds = Math.floor((duration / 1000) % 60);
+      const minutes = Math.floor((duration / (1000 * 60)) % 60);
+      return `${minutes}:${seconds.toString().padStart(2, "0")}`;
+    }
 
     const duration = durationMs > 0 ? msToTime(durationMs) : "Unknown";
     const progress = progressMs > 0 ? msToTime(progressMs) : "Unknown";
 
-    return { track, artist, album, url, image, start, end, duration, progress };
+    return { track, artist, album, url, image, startMs, endMs, duration, progress };
   } catch (error) {
     console.error("Error fetching Spotify activity:", error);
     return null;
@@ -96,20 +73,38 @@ function buildEmbed(data) {
       embeds: [],
     };
   }
-  let embedJson = embedTemplate
-    .replace(/{track}/g, data.track)
-    .replace(/{artist}/g, data.artist)
-    .replace(/{album}/g, data.album)
-    .replace(/{url}/g, data.url)
-    .replace(/{image}/g, data.image || "")
-    .replace(/{start}/g, data.start)
-    .replace(/{end}/g, data.end)
-    .replace(/{duration}/g, data.duration)
-    .replace(/{progress}/g, data.progress);
 
-  const embedData = JSON.parse(embedJson);
-  const embed = EmbedBuilder.from(embedData);
-  return { content: "", embeds: [embed] };
+  const embed = new EmbedBuilder()
+    .setTitle("currently listening")
+    .setColor(0x000000) // black color
+    .setAuthor({
+      name: "/lowky",
+      iconURL:
+        "https://cdn.discordapp.com/icons/1388338610884837429/d37930f7bec00e820124afeb55138fc9.webp?size=4096",
+    })
+    .setDescription(
+      `${data.track}\n${data.artist}\nAlbum: ${data.album}\n[Open in Spotify](${data.url})`
+    )
+    .setImage(data.image || null)
+    .addFields(
+      {
+        name: "Started",
+        value: `<t:${Math.floor(data.startMs / 1000)}:t>`,
+        inline: true,
+      },
+      {
+        name: "Ends",
+        value: `<t:${Math.floor(data.endMs / 1000)}:t>`,
+        inline: true,
+      },
+      {
+        name: "Progress",
+        value: `${data.progress} / ${data.duration}`,
+        inline: true,
+      }
+    );
+
+  return { embeds: [embed], content: "" };
 }
 
 async function updateSpotifyStatus() {
@@ -194,16 +189,18 @@ client.on("interactionCreate", async (interaction) => {
         await interaction.reply({ content: "You do not have permission to use this command.", ephemeral: true });
         return;
       }
-
-      // Send embed message and save message ID
-      {
+      try {
         const channel = interaction.channel;
         const data = await fetchSpotifyActivity();
         const builtMessage = buildEmbed(data);
         const sentMsg = await channel.send(builtMessage);
         storedMessageId = sentMsg.id;
-
         await interaction.reply({ content: `Embed message sent and stored with ID: ${storedMessageId}`, ephemeral: true });
+      } catch (error) {
+        console.error("Error in setembed command:", error);
+        if (!interaction.replied) {
+          await interaction.reply({ content: `Failed to send embed: ${error.message}`, ephemeral: true });
+        }
       }
       break;
 
@@ -229,10 +226,8 @@ client.on("interactionCreate", async (interaction) => {
     case "testembed": {
       const data = await fetchSpotifyActivity();
       const builtMessage = buildEmbed(data);
-
       const channel = interaction.channel;
       await channel.send(builtMessage);
-
       await interaction.reply({ content: "Test embed sent!", ephemeral: true });
       break;
     }
