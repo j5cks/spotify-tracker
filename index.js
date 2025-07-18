@@ -1,268 +1,221 @@
-import { Client, GatewayIntentBits, EmbedBuilder, SlashCommandBuilder } from 'discord.js';
-import fetch from 'node-fetch';
+import { Client, GatewayIntentBits, EmbedBuilder, REST, Routes, SlashCommandBuilder } from "discord.js";
+import fetch from "node-fetch";
 
-const DISCORD_TOKEN = process.env.Discord_token;
-const SPOTIFY_CLIENT_ID = process.env.Spotify_client_id;
-const SPOTIFY_CLIENT_SECRET = process.env.Spotify_client_secret;
-const SPOTIFY_REFRESH_TOKEN = process.env.Spotify_refresh_token;
-const CHANNEL_ID = process.env.Channel_id;
-const ALLOWED_ROLE_ID = process.env.Allowed_role_id; // your role ID for restricted commands
-let storedMessageId = process.env.Message_id || null;
+const {
+  DISCORD_TOKEN,
+  GUILD_ID,
+  CHANNEL_ID,
+  OWNER_ID,
+  SPOTIFY_CLIENT_ID,
+  SPOTIFY_CLIENT_SECRET,
+  SPOTIFY_REFRESH_TOKEN,
+  PORT = 8080,
+} = process.env;
+
+if (!DISCORD_TOKEN || !GUILD_ID || !CHANNEL_ID || !OWNER_ID || !SPOTIFY_CLIENT_ID || !SPOTIFY_CLIENT_SECRET || !SPOTIFY_REFRESH_TOKEN) {
+  console.error("One or more environment variables are missing.");
+  process.exit(1);
+}
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 let spotifyAccessToken = null;
-let smartCapitalization = true; // default on
-
-function smartLowercase(str) {
-  if (!str) return '';
-  const letters = str.replace(/[^A-Za-z]/g, '');
-  if (letters && letters === letters.toUpperCase()) return str;
-  return str.toLowerCase();
-}
+let spotifyAccessTokenExpiresAt = 0;
+let lastSpotifyData = null;
+let updateInterval = 5000; // Start at 5 seconds
+let updateTimeout;
 
 async function refreshSpotifyToken() {
-  const creds = Buffer.from(`${SPOTIFY_CLIENT_ID}:${SPOTIFY_CLIENT_SECRET}`).toString('base64');
-  const response = await fetch('https://accounts.spotify.com/api/token', {
-    method: 'POST',
-    headers: { Authorization: `Basic ${creds}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+  const response = await fetch("https://accounts.spotify.com/api/token", {
+    method: "POST",
+    headers: {
+      Authorization:
+        "Basic " + Buffer.from(`${SPOTIFY_CLIENT_ID}:${SPOTIFY_CLIENT_SECRET}`).toString("base64"),
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
     body: new URLSearchParams({
-      grant_type: 'refresh_token',
+      grant_type: "refresh_token",
       refresh_token: SPOTIFY_REFRESH_TOKEN,
     }),
   });
 
   if (!response.ok) {
-    throw new Error(`Failed to refresh Spotify token: ${response.statusText}`);
+    throw new Error(`Failed to refresh Spotify token: ${response.status} ${response.statusText}`);
   }
   const data = await response.json();
   spotifyAccessToken = data.access_token;
+  // Spotify says access tokens last 3600s, set expiration time to now + 55 min for buffer
+  spotifyAccessTokenExpiresAt = Date.now() + (data.expires_in || 3600) * 1000 * 0.9;
+  return spotifyAccessToken;
+}
+
+async function getSpotifyAccessToken() {
+  if (!spotifyAccessToken || Date.now() > spotifyAccessTokenExpiresAt) {
+    return refreshSpotifyToken();
+  }
+  return spotifyAccessToken;
 }
 
 async function fetchSpotifyData() {
-  if (!spotifyAccessToken) {
-    await refreshSpotifyToken();
-  }
+  const token = await getSpotifyAccessToken();
 
-  const res = await fetch('https://api.spotify.com/v1/me/player/currently-playing', {
-    headers: { Authorization: `Bearer ${spotifyAccessToken}` },
+  const res = await fetch("https://api.spotify.com/v1/me/player/currently-playing", {
+    headers: { Authorization: `Bearer ${token}` },
   });
 
-  if (res.status === 204) return null; // no content means nothing playing
-  if (res.status === 401) {
-    // Token expired, refresh and retry once
-    await refreshSpotifyToken();
-    return fetchSpotifyData();
-  }
+  if (res.status === 204) return null; // No content, nothing playing
 
-  if (!res.ok) throw new Error(`Spotify API error: ${res.statusText}`);
+  if (!res.ok) {
+    throw new Error(`Failed to fetch Spotify currently playing: ${res.status} ${res.statusText}`);
+  }
 
   const data = await res.json();
-  if (!data.is_playing || !data.item) return null;
 
-  // Build info object
-  const track = smartCapitalization
-    ? smartLowercase(data.item.name)
-    : data.item.name;
-  const artist = smartCapitalization
-    ? smartLowercase(data.item.artists.map(a => a.name).join(', '))
-    : data.item.artists.map(a => a.name).join(', ');
+  if (!data || !data.item) return null;
 
-  const startMs = Date.now() - data.progress_ms;
-  const endMs = startMs + data.item.duration_ms;
+  const progress_ms = data.progress_ms;
+  const duration_ms = data.item.duration_ms;
+  const started_at = Date.now() - progress_ms;
+  const ends_at = started_at + duration_ms;
 
-  const progress = formatDuration(data.progress_ms);
-  const duration = formatDuration(data.item.duration_ms);
-
-  const image = data.item.album.images[0]?.url || null;
-
-  return { track, artist, startMs, endMs, progress, duration, image };
+  return {
+    track: data.item.name,
+    artist: data.item.artists.map(a => a.name).join(", "),
+    albumArt: data.item.album.images[0]?.url || null,
+    progress_ms,
+    duration_ms,
+    started_at,
+    ends_at,
+    is_playing: data.is_playing,
+    spotify_url: data.item.external_urls.spotify,
+  };
 }
 
-function formatDuration(ms) {
-  const totalSeconds = Math.floor(ms / 1000);
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  return `${minutes}:${seconds.toString().padStart(2, '0')}`;
-}
+function createEmbed(data) {
+  if (!data) {
+    return new EmbedBuilder()
+      .setTitle("jack is not listening to anything right now")
+      .setColor("#000000");
+  }
 
-function buildEmbed(data) {
+  // format progress times as mm:ss
+  const formatTime = (ms) => {
+    const totalSeconds = Math.floor(ms / 1000);
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return `${minutes}:${seconds.toString().padStart(2, "0")}`;
+  };
+
+  const progressFormatted = formatTime(data.progress_ms);
+  const durationFormatted = formatTime(data.duration_ms);
+
   return new EmbedBuilder()
-    .setColor('#000000') // black left bar
-    .setTitle('jack is currently listening to')
-    .setDescription(`${data.track} by ${data.artist}`)
+    .setColor("#000000") // Black bar on left
+    .setTitle("jack is currently listening to")
+    .setDescription(`**${data.track}** by **${data.artist}**`)
+    .setThumbnail(data.albumArt)
     .addFields(
-      { name: 'Started', value: `<t:${Math.floor(data.startMs / 1000)}:t>`, inline: true },
-      { name: 'Ends', value: `<t:${Math.floor(data.endMs / 1000)}:t>`, inline: true },
-      { name: 'Progress', value: `${data.progress} / ${data.duration}`, inline: true },
+      { name: "Started", value: `<t:${Math.floor(data.started_at / 1000)}:t>`, inline: true },
+      { name: "Ends", value: `<t:${Math.floor(data.ends_at / 1000)}:t>`, inline: true },
+      { name: "Progress", value: `${progressFormatted} / ${durationFormatted}`, inline: true }
     )
-    .setImage(data.image);
+    .setTimestamp();
 }
 
-async function updateOrSendMessage(embed) {
-  const channel = await client.channels.fetch(CHANNEL_ID);
-  if (!channel) {
-    console.error('Channel not found');
-    return;
-  }
+async function updateSpotifyMessage(channel, messageId) {
+  try {
+    const data = await fetchSpotifyData();
 
-  if (storedMessageId) {
-    try {
-      const msg = await channel.messages.fetch(storedMessageId);
-      if (msg) {
-        await msg.edit({ embeds: [embed] });
-        return;
+    if (!data) {
+      // no track playing
+      if (messageId) {
+        // edit existing message
+        const msg = await channel.messages.fetch(messageId).catch(() => null);
+        if (msg) await msg.edit({ embeds: [createEmbed(null)] });
       }
-    } catch {
-      // message not found or error - fallback to sending new
+      return;
     }
-  }
 
-  const msg = await channel.send({ embeds: [embed] });
-  storedMessageId = msg.id;
+    lastSpotifyData = data;
+
+    let msg;
+    if (messageId) {
+      msg = await channel.messages.fetch(messageId).catch(() => null);
+      if (msg) {
+        await msg.edit({ embeds: [createEmbed(data)] });
+      } else {
+        msg = await channel.send({ embeds: [createEmbed(data)] });
+      }
+    } else {
+      msg = await channel.send({ embeds: [createEmbed(data)] });
+    }
+    return msg.id;
+  } catch (err) {
+    console.error("Error updating Spotify message:", err);
+  }
+}
+
+function scheduleNextUpdate(channel, messageId) {
+  // Use dynamic update interval based on whether music is playing
+  const interval = lastSpotifyData && lastSpotifyData.is_playing ? 5000 : 30000;
+  updateTimeout = setTimeout(async () => {
+    const newMessageId = await updateSpotifyMessage(channel, messageId);
+    scheduleNextUpdate(channel, newMessageId || messageId);
+  }, interval);
 }
 
 const commands = [
-  new SlashCommandBuilder().setName('testembed').setDescription('Send a test Spotify embed message'),
-  new SlashCommandBuilder().setName('restart').setDescription('Restart the bot (logout and login)'),
-  new SlashCommandBuilder().setName('setembed').setDescription('Send embed message and store its ID (restricted)'),
-  new SlashCommandBuilder().setName('status').setDescription('Show bot status and settings'),
   new SlashCommandBuilder()
-    .setName('smartcase')
-    .setDescription('Toggle smart capitalization on/off')
-    .addStringOption(option =>
-      option.setName('mode')
-        .setDescription('Set smart capitalization mode')
-        .setRequired(true)
-        .addChoices(
-          { name: 'on', value: 'on' },
-          { name: 'off', value: 'off' },
-        )),
-  // Extra commands you wanted:
-  new SlashCommandBuilder().setName('skip').setDescription('Skip the current song'),
-  new SlashCommandBuilder().setName('pause').setDescription('Pause the current song'),
-  new SlashCommandBuilder().setName('stop').setDescription('Stop playback'),
-].map(cmd => cmd.toJSON());
+    .setName("spotifystatus")
+    .setDescription("Show current Spotify listening status"),
+  new SlashCommandBuilder()
+    .setName("getspotifytoken")
+    .setDescription("Get the current Spotify access token (owner only)"),
+];
 
 async function registerCommands() {
-  if (!client.application?.owner) await client.application?.fetch();
-  await client.application.commands.set(commands);
-  console.log('Slash commands registered');
+  const rest = new REST({ version: "10" }).setToken(DISCORD_TOKEN);
+  try {
+    console.log("Registering slash commands...");
+    await rest.put(Routes.applicationGuildCommands(client.user.id, GUILD_ID), {
+      body: commands.map(cmd => cmd.toJSON()),
+    });
+    console.log("Slash commands registered.");
+  } catch (error) {
+    console.error("Error registering commands:", error);
+  }
 }
 
-client.on('ready', () => {
+client.once("ready", async () => {
   console.log(`Logged in as ${client.user.tag}`);
+  await registerCommands();
 
-  registerCommands();
-
-  updateSpotifyMessage();
+  const channel = await client.channels.fetch(CHANNEL_ID);
+  if (!channel) {
+    console.error("Channel not found!");
+    process.exit(1);
+  }
+  scheduleNextUpdate(channel, null);
 });
 
-client.on('interactionCreate', async interaction => {
+client.on("interactionCreate", async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
-  const hasRole = interaction.member.roles.cache.has(ALLOWED_ROLE_ID);
+  if (interaction.commandName === "spotifystatus") {
+    const data = await fetchSpotifyData();
+    const embed = createEmbed(data);
+    await interaction.reply({ embeds: [embed], ephemeral: true });
+  }
 
-  switch (interaction.commandName) {
-    case 'testembed': {
-      const data = await fetchSpotifyData();
-      if (!data) {
-        await interaction.reply({ content: 'No Spotify activity found.', ephemeral: true });
-        return;
-      }
-      const embed = buildEmbed(data);
-      await interaction.reply({ embeds: [embed] });
-      break;
+  if (interaction.commandName === "getspotifytoken") {
+    if (interaction.user.id !== OWNER_ID) {
+      return interaction.reply({ content: "You do not have permission to use this command.", ephemeral: true });
     }
-    case 'restart': {
-      if (!hasRole) {
-        await interaction.reply({ content: 'You do not have permission to use this command.', ephemeral: true });
-        return;
-      }
-      await interaction.reply({ content: 'Restarting bot...' });
-      await client.destroy();
-      await client.login(DISCORD_TOKEN);
-      break;
+    if (!spotifyAccessToken) {
+      await refreshSpotifyToken();
     }
-    case 'setembed': {
-      if (!hasRole) {
-        await interaction.reply({ content: 'You do not have permission to use this command.', ephemeral: true });
-        return;
-      }
-      const data = await fetchSpotifyData();
-      if (!data) {
-        await interaction.reply({ content: 'No Spotify activity found.', ephemeral: true });
-        return;
-      }
-      const embed = buildEmbed(data);
-      const channel = await client.channels.fetch(CHANNEL_ID);
-      const msg = await channel.send({ embeds: [embed] });
-      storedMessageId = msg.id;
-      await interaction.reply({ content: 'Embed message sent and stored.', ephemeral: true });
-      break;
-    }
-    case 'status': {
-      const uptimeSeconds = Math.floor(client.uptime / 1000);
-      const hours = Math.floor(uptimeSeconds / 3600);
-      const minutes = Math.floor((uptimeSeconds % 3600) / 60);
-      const seconds = uptimeSeconds % 60;
-
-      const uptimeString = `${hours}h ${minutes}m ${seconds}s`;
-      await interaction.reply({
-        content: `🟢 Bot is running\n⏱️ Uptime: ${uptimeString}\n📝 Smart Capitalization: ${smartCapitalization ? 'ON' : 'OFF'}`,
-        ephemeral: true,
-      });
-      break;
-    }
-    case 'smartcase': {
-      if (!hasRole) {
-        await interaction.reply({ content: 'You do not have permission to use this command.', ephemeral: true });
-        return;
-      }
-      const mode = interaction.options.getString('mode');
-      smartCapitalization = mode === 'on';
-      await interaction.reply({
-        content: `Smart Capitalization is now **${smartCapitalization ? 'ON' : 'OFF'}**.`,
-        ephemeral: true,
-      });
-      break;
-    }
-    // Dummy implementations for skip, pause, stop:
-    case 'skip':
-    case 'pause':
-    case 'stop': {
-      await interaction.reply({ content: 'This command is not implemented yet.', ephemeral: true });
-      break;
-    }
-    default:
-      break;
+    await interaction.reply({ content: `Current Spotify Access Token:\n\`${spotifyAccessToken}\``, ephemeral: true });
   }
 });
-
-// Dynamic interval updating Spotify message
-let updateInterval = 5000;
-
-async function updateSpotifyMessage() {
-  try {
-    const spotifyData = await fetchSpotifyData();
-    if (!spotifyData) {
-      console.log('No Spotify data found.');
-      updateInterval = 10000;
-    } else {
-      const embed = buildEmbed(spotifyData);
-      await updateOrSendMessage(embed);
-
-      const now = Date.now();
-      const timeLeft = spotifyData.endMs - now;
-
-      updateInterval = Math.min(5000, Math.max(1000, timeLeft));
-    }
-  } catch (error) {
-    console.error('Error updating Spotify message:', error);
-    updateInterval = 10000;
-  } finally {
-    setTimeout(updateSpotifyMessage, updateInterval);
-  }
-}
 
 client.login(DISCORD_TOKEN);
