@@ -1,0 +1,14 @@
+{
+  "name": "spotify-discord-bot",
+  "version": "1.0.0",
+  "description": "Discord bot to show Spotify listening status in embed",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.11.0",
+    "dotenv": "^16.3.1"
+  }
+}
