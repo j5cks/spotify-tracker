@@ -18,6 +18,16 @@ const CHANNEL_ID = process.env.CHANNEL_ID;
 const ALLOWED_ROLE_ID = "1388340520128086182";
 
 let storedMessageId = process.env.MESSAGE_ID || null;
+let smartCapitalization = true; // Default ON
+
+function smartLowercase(str) {
+  if (!str) return "";
+  const letters = str.replace(/[^A-Za-z]/g, "");
+  if (letters && letters === letters.toUpperCase()) {
+    return str;
+  }
+  return str.toLowerCase();
+}
 
 async function fetchSpotifyActivity() {
   try {
@@ -35,11 +45,14 @@ async function fetchSpotifyActivity() {
 
     if (!spotifyActivity) return null;
 
-    const track = spotifyActivity.details || "Unknown Track";
-    const artist = spotifyActivity.state || "Unknown Artist";
+    const trackRaw = spotifyActivity.details || "Unknown Track";
+    const artistRaw = spotifyActivity.state || "Unknown Artist";
     const image = spotifyActivity.assets?.largeImage
       ? spotifyActivity.assets.largeImage.replace("spotify:", "https://i.scdn.co/image/")
       : null;
+
+    const track = smartCapitalization ? smartLowercase(trackRaw) : trackRaw;
+    const artist = smartCapitalization ? smartLowercase(artistRaw) : artistRaw;
 
     const startMs = spotifyActivity.timestamps?.start || 0;
     const endMs = spotifyActivity.timestamps?.end || 0;
@@ -84,17 +97,17 @@ function buildEmbed(data) {
     .setImage(data.image || null)
     .addFields(
       {
-        name: "Started",
+        name: "started",
         value: `<t:${Math.floor(data.startMs / 1000)}:t>`,
         inline: true,
       },
       {
-        name: "Ends",
+        name: "ends",
         value: `<t:${Math.floor(data.endMs / 1000)}:t>`,
         inline: true,
       },
       {
-        name: "Progress",
+        name: "progress",
         value: `${data.progress} / ${data.duration}`,
         inline: true,
       }
@@ -149,6 +162,20 @@ const commands = [
   new SlashCommandBuilder().setName("testembed").setDescription("Send a test Spotify embed message"),
   new SlashCommandBuilder().setName("restart").setDescription("Restart the bot (logout and login)"),
   new SlashCommandBuilder().setName("setembed").setDescription("Send embed message and store its ID (restricted)"),
+  new SlashCommandBuilder()
+    .setName("status")
+    .setDescription("Show bot status and settings"),
+  new SlashCommandBuilder()
+    .setName("smartcase")
+    .setDescription("Toggle smart capitalization on/off")
+    .addStringOption(option =>
+      option.setName("mode")
+        .setDescription("Set smart capitalization mode")
+        .setRequired(true)
+        .addChoices(
+          { name: "on", value: "on" },
+          { name: "off", value: "off" },
+        )),
 ].map(command => command.toJSON());
 
 async function registerCommands() {
@@ -233,6 +260,36 @@ client.on("interactionCreate", async (interaction) => {
       stopUpdating();
       await client.destroy();
       await client.login(process.env.BOT_TOKEN);
+      break;
+
+    case "status": {
+      const uptimeSeconds = Math.floor(client.uptime / 1000);
+      const hours = Math.floor(uptimeSeconds / 3600);
+      const minutes = Math.floor((uptimeSeconds % 3600) / 60);
+      const seconds = uptimeSeconds % 60;
+
+      const uptimeString = `${hours}h ${minutes}m ${seconds}s`;
+
+      await interaction.reply({
+        content: `🟢 Bot is running\n⏱️ Uptime: ${uptimeString}\n📝 Smart Capitalization: ${smartCapitalization ? "ON" : "OFF"}`,
+        ephemeral: true,
+      });
+      break;
+    }
+
+    case "smartcase":
+      if (!hasRole) {
+        await interaction.reply({ content: "You do not have permission to use this command.", ephemeral: true });
+        return;
+      }
+      {
+        const mode = interaction.options.getString("mode");
+        smartCapitalization = mode === "on";
+        await interaction.reply({
+          content: `Smart Capitalization is now **${smartCapitalization ? "ON" : "OFF"}**.`,
+          ephemeral: true,
+        });
+      }
       break;
   }
 });
