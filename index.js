@@ -22,8 +22,13 @@ const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 let spotifyAccessToken = null;
 let spotifyAccessTokenExpiresAt = 0;
 let lastSpotifyData = null;
-let updateInterval = 5000; // Start at 5 seconds
 let updateTimeout;
+
+function smartCase(text) {
+  if (!text) return text;
+  if (text === text.toUpperCase()) return text; // keep fully uppercase
+  return text.toLowerCase();
+}
 
 async function refreshSpotifyToken() {
   const response = await fetch("https://accounts.spotify.com/api/token", {
@@ -44,7 +49,6 @@ async function refreshSpotifyToken() {
   }
   const data = await response.json();
   spotifyAccessToken = data.access_token;
-  // Spotify says access tokens last 3600s, set expiration time to now + 55 min for buffer
   spotifyAccessTokenExpiresAt = Date.now() + (data.expires_in || 3600) * 1000 * 0.9;
   return spotifyAccessToken;
 }
@@ -63,14 +67,10 @@ async function fetchSpotifyData() {
     headers: { Authorization: `Bearer ${token}` },
   });
 
-  if (res.status === 204) return null; // No content, nothing playing
-
-  if (!res.ok) {
-    throw new Error(`Failed to fetch Spotify currently playing: ${res.status} ${res.statusText}`);
-  }
+  if (res.status === 204) return null;
+  if (!res.ok) throw new Error(`Failed to fetch Spotify currently playing: ${res.status} ${res.statusText}`);
 
   const data = await res.json();
-
   if (!data || !data.item) return null;
 
   const progress_ms = data.progress_ms;
@@ -87,7 +87,6 @@ async function fetchSpotifyData() {
     started_at,
     ends_at,
     is_playing: data.is_playing,
-    spotify_url: data.item.external_urls.spotify,
   };
 }
 
@@ -98,7 +97,6 @@ function createEmbed(data) {
       .setColor("#000000");
   }
 
-  // format progress times as mm:ss
   const formatTime = (ms) => {
     const totalSeconds = Math.floor(ms / 1000);
     const minutes = Math.floor(totalSeconds / 60);
@@ -110,9 +108,9 @@ function createEmbed(data) {
   const durationFormatted = formatTime(data.duration_ms);
 
   return new EmbedBuilder()
-    .setColor("#000000") // Black bar on left
+    .setColor("#000000")
     .setTitle("jack is currently listening to")
-    .setDescription(`**${data.track}** by **${data.artist}**`)
+    .setDescription(`**${smartCase(data.track)}** by **${smartCase(data.artist)}**`)
     .setThumbnail(data.albumArt)
     .addFields(
       { name: "Started", value: `<t:${Math.floor(data.started_at / 1000)}:t>`, inline: true },
@@ -127,9 +125,7 @@ async function updateSpotifyMessage(channel, messageId) {
     const data = await fetchSpotifyData();
 
     if (!data) {
-      // no track playing
       if (messageId) {
-        // edit existing message
         const msg = await channel.messages.fetch(messageId).catch(() => null);
         if (msg) await msg.edit({ embeds: [createEmbed(null)] });
       }
@@ -156,7 +152,6 @@ async function updateSpotifyMessage(channel, messageId) {
 }
 
 function scheduleNextUpdate(channel, messageId) {
-  // Use dynamic update interval based on whether music is playing
   const interval = lastSpotifyData && lastSpotifyData.is_playing ? 5000 : 30000;
   updateTimeout = setTimeout(async () => {
     const newMessageId = await updateSpotifyMessage(channel, messageId);
@@ -164,26 +159,30 @@ function scheduleNextUpdate(channel, messageId) {
   }, interval);
 }
 
+async function spotifyControl(action) {
+  const token = await getSpotifyAccessToken();
+  const url = `https://api.spotify.com/v1/me/player/${action}`;
+  const res = await fetch(url, { method: "POST", headers: { Authorization: `Bearer ${token}` } });
+  if (!res.ok) throw new Error(`Failed to ${action} track: ${res.status} ${res.statusText}`);
+}
+
 const commands = [
-  new SlashCommandBuilder()
-    .setName("spotifystatus")
-    .setDescription("Show current Spotify listening status"),
-  new SlashCommandBuilder()
-    .setName("getspotifytoken")
-    .setDescription("Get the current Spotify access token (owner only)"),
+  new SlashCommandBuilder().setName("spotifystatus").setDescription("Show current Spotify listening status"),
+  new SlashCommandBuilder().setName("getspotifytoken").setDescription("Get the current Spotify access token (owner only)"),
+  new SlashCommandBuilder().setName("reloadcommands").setDescription("Remove and re-register all slash commands (owner only)"),
+  new SlashCommandBuilder().setName("clearcommands").setDescription("Remove all slash commands from the guild (owner only)"),
+  new SlashCommandBuilder().setName("pause").setDescription("Pause playback (owner only)"),
+  new SlashCommandBuilder().setName("skip").setDescription("Skip current track (owner only)"),
+  new SlashCommandBuilder().setName("stop").setDescription("Stop playback (owner only)")
 ];
 
 async function registerCommands() {
   const rest = new REST({ version: "10" }).setToken(DISCORD_TOKEN);
-  try {
-    console.log("Registering slash commands...");
-    await rest.put(Routes.applicationGuildCommands(client.user.id, GUILD_ID), {
-      body: commands.map(cmd => cmd.toJSON()),
-    });
-    console.log("Slash commands registered.");
-  } catch (error) {
-    console.error("Error registering commands:", error);
-  }
+  console.log("Registering slash commands...");
+  await rest.put(Routes.applicationGuildCommands(client.user.id, GUILD_ID), {
+    body: commands.map(cmd => cmd.toJSON()),
+  });
+  console.log("Slash commands registered.");
 }
 
 client.once("ready", async () => {
@@ -203,8 +202,7 @@ client.on("interactionCreate", async (interaction) => {
 
   if (interaction.commandName === "spotifystatus") {
     const data = await fetchSpotifyData();
-    const embed = createEmbed(data);
-    await interaction.reply({ embeds: [embed], ephemeral: true });
+    await interaction.reply({ embeds: [createEmbed(data)], ephemeral: true });
   }
 
   if (interaction.commandName === "getspotifytoken") {
@@ -215,6 +213,35 @@ client.on("interactionCreate", async (interaction) => {
       await refreshSpotifyToken();
     }
     await interaction.reply({ content: `Current Spotify Access Token:\n\`${spotifyAccessToken}\``, ephemeral: true });
+  }
+
+  if (interaction.commandName === "reloadcommands" || interaction.commandName === "clearcommands") {
+    if (interaction.user.id !== OWNER_ID) {
+      return interaction.reply({ content: "You do not have permission to use this command.", ephemeral: true });
+    }
+    const rest = new REST({ version: "10" }).setToken(DISCORD_TOKEN);
+    if (interaction.commandName === "clearcommands") {
+      await rest.put(Routes.applicationGuildCommands(client.user.id, GUILD_ID), { body: [] });
+      return interaction.reply({ content: "All commands cleared.", ephemeral: true });
+    } else {
+      await rest.put(Routes.applicationGuildCommands(client.user.id, GUILD_ID), { body: [] });
+      await rest.put(Routes.applicationGuildCommands(client.user.id, GUILD_ID), { body: commands.map(cmd => cmd.toJSON()) });
+      return interaction.reply({ content: "Commands have been reloaded.", ephemeral: true });
+    }
+  }
+
+  if (interaction.commandName === "pause" || interaction.commandName === "skip" || interaction.commandName === "stop") {
+    if (interaction.user.id !== OWNER_ID) {
+      return interaction.reply({ content: "You do not have permission to use this command.", ephemeral: true });
+    }
+    try {
+      if (interaction.commandName === "pause") await spotifyControl("pause");
+      if (interaction.commandName === "skip") await spotifyControl("next");
+      if (interaction.commandName === "stop") await spotifyControl("pause");
+      await interaction.reply({ content: `Spotify playback ${interaction.commandName} command sent.`, ephemeral: true });
+    } catch (err) {
+      await interaction.reply({ content: `Failed to ${interaction.commandName} track: ${err.message}`, ephemeral: true });
+    }
   }
 });
 
