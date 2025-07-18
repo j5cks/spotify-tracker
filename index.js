@@ -8,14 +8,16 @@ const client = new Client({
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildPresences,
     GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
   ],
 });
 
 const USER_ID = process.env.USER_ID;
 const CHANNEL_ID = process.env.CHANNEL_ID;
-const MESSAGE_ID = process.env.MESSAGE_ID;
+const ALLOWED_ROLE_ID = "1388340520128086182";
 
-let updateInterval = null;
+let storedMessageId = process.env.MESSAGE_ID || null; // fallback if you want
 
 const embedTemplate = `{
   "title": "currently listening",
@@ -46,7 +48,12 @@ function timestampToDiscord(ts) {
 
 async function fetchSpotifyActivity() {
   try {
-    const guild = await client.guilds.fetch(CHANNEL_ID.substring(0, 18));
+    const channel = await client.channels.fetch(CHANNEL_ID);
+    if (!channel || !channel.guild) {
+      console.log("Channel or guild not found");
+      return null;
+    }
+    const guild = channel.guild;
     const member = await guild.members.fetch(USER_ID);
 
     const spotifyActivity = member.presence?.activities.find(
@@ -106,20 +113,30 @@ function buildEmbed(data) {
 }
 
 async function updateSpotifyStatus() {
+  if (!storedMessageId) {
+    console.log("No message ID stored, cannot update.");
+    return;
+  }
   try {
     const channel = await client.channels.fetch(CHANNEL_ID);
-    const message = await channel.messages.fetch(MESSAGE_ID);
-
+    if (!channel) {
+      console.log("Channel not found");
+      return;
+    }
+    const message = await channel.messages.fetch(storedMessageId);
+    if (!message) {
+      console.log("Message to update not found");
+      return;
+    }
     const data = await fetchSpotifyActivity();
-
     const updatedMessage = buildEmbed(data);
-
     await message.edit(updatedMessage);
   } catch (err) {
     console.error("Error updating status:", err);
   }
 }
 
+let updateInterval = null;
 async function startUpdating(intervalMs = 15000) {
   if (updateInterval) return;
   await updateSpotifyStatus();
@@ -140,6 +157,7 @@ const commands = [
   new SlashCommandBuilder().setName("stop").setDescription("Stop auto-updating Spotify status"),
   new SlashCommandBuilder().setName("testembed").setDescription("Send a test Spotify embed message"),
   new SlashCommandBuilder().setName("restart").setDescription("Restart the bot (logout and login)"),
+  new SlashCommandBuilder().setName("setembed").setDescription("Send embed message and store its ID (restricted)"),
 ].map(command => command.toJSON());
 
 async function registerCommands() {
@@ -167,29 +185,58 @@ client.once("ready", async () => {
 client.on("interactionCreate", async (interaction) => {
   if (!interaction.isCommand()) return;
 
+  const memberRoles = interaction.member.roles.cache;
+  const hasRole = memberRoles.has(ALLOWED_ROLE_ID);
+
   switch (interaction.commandName) {
+    case "setembed":
+      if (!hasRole) {
+        await interaction.reply({ content: "You do not have permission to use this command.", ephemeral: true });
+        return;
+      }
+
+      // Send embed message and save message ID
+      {
+        const channel = interaction.channel;
+        const data = await fetchSpotifyActivity();
+        const builtMessage = buildEmbed(data);
+        const sentMsg = await channel.send(builtMessage);
+        storedMessageId = sentMsg.id;
+
+        await interaction.reply({ content: `Embed message sent and stored with ID: ${storedMessageId}`, ephemeral: true });
+      }
+      break;
+
     case "refresh":
+      if (!storedMessageId) {
+        await interaction.reply({ content: "Embed message ID is not set. Use /setembed first.", ephemeral: true });
+        return;
+      }
       await updateSpotifyStatus();
       await interaction.reply({ content: "Spotify embed refreshed.", ephemeral: true });
       break;
+
     case "start":
       startUpdating();
       await interaction.reply({ content: "Started auto-updating Spotify status.", ephemeral: true });
       break;
+
     case "stop":
       stopUpdating();
       await interaction.reply({ content: "Stopped auto-updating Spotify status.", ephemeral: true });
       break;
+
     case "testembed": {
       const data = await fetchSpotifyActivity();
       const builtMessage = buildEmbed(data);
 
-      const channel = await client.channels.fetch(CHANNEL_ID);
+      const channel = interaction.channel;
       await channel.send(builtMessage);
 
       await interaction.reply({ content: "Test embed sent!", ephemeral: true });
       break;
     }
+
     case "restart":
       await interaction.reply({ content: "Restarting bot...", ephemeral: true });
       stopUpdating();
